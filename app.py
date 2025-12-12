@@ -239,8 +239,7 @@ if st.session_state.portfolio:
     current_passive = df.iloc[0]["Passive Income (Net)"] / 12
     c3.metric("Current Safe Monthly Income (Net)", f"${current_passive:,.0f}")
 
-    # --- CHART 1: CROSSOVER ---
-    # --- CHART 1: CROSSOVER ---
+   # --- CHART 1: CROSSOVER ---
     st.subheader("The Crossover Point: When you can safely retire")
     
     # 1. Add a Toggle to switch views
@@ -268,18 +267,8 @@ if st.session_state.portfolio:
         x=0.5
     ))
     
-    st.plotly_chart(fig_fi, use_container_width=True)
-    
-    # Legend Fix for Chart 1
-    fig_fi.update_layout(legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=-0.3, # Push it below the x-axis
-        xanchor="center",
-        x=0.5
-    ))
-    
-    st.plotly_chart(fig_fi, use_container_width=True)
+    # FIXED LINE: Added key="crossover" to prevent Duplicate ID error
+    st.plotly_chart(fig_fi, use_container_width=True, key="crossover_chart")
 
     # --- CHART 2: STACKED AREA ---
     st.subheader("Gross Portfolio Composition (Real $)")
