@@ -1,0 +1,9 @@
+# User Data
+user_data.json
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env

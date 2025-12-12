@@ -2,305 +2,298 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from dataclasses import dataclass
-from typing import Literal
 import datetime
 import copy
+from logic import run_simulation
+from ui import render_asset_card, render_liability_card, render_event_card
+from storage import load_data, save_data
 
 # ==========================================
-# 1. HELPER FUNCTIONS & TAX LOGIC
-# ==========================================
-
-def calculate_progressive_tax(income, filing_status="Single"):
-    """Simplified 2024 IRS Tax Brackets approximation."""
-    if income <= 0: return 0
-    std_deduction = 14600 if filing_status == "Single" else 29200
-    taxable_income = max(0, income - std_deduction)
-    
-    if filing_status == "Single":
-        brackets = [(0.10, 11600), (0.12, 47150), (0.22, 100525), (0.24, 191950), (0.32, 243725), (0.35, 609350)]
-    else:
-        brackets = [(0.10, 23200), (0.12, 94300), (0.22, 201050), (0.24, 383900), (0.32, 487450), (0.35, 731200)]
-        
-    tax = 0
-    previous_limit = 0
-    for rate, limit in brackets:
-        if taxable_income > limit:
-            tax += (limit - previous_limit) * rate
-            previous_limit = limit
-        else:
-            tax += (taxable_income - previous_limit) * rate
-            return tax
-    tax += (taxable_income - previous_limit) * 0.37
-    return tax
-
-# ==========================================
-# 2. THE BLUEPRINTS
-# ==========================================
-TaxType = Literal['Roth', 'Pre-Tax', 'Taxable', 'N/A']
-
-@dataclass
-class Asset:
-    name: str
-    balance: float
-    annual_contribution: float
-    annual_growth_rate: float
-    tax_status: TaxType
-    category: str 
-
-    def project_year(self, contribution_growth_rate):
-        growth = self.balance * self.annual_growth_rate
-        self.annual_contribution *= (1 + contribution_growth_rate)
-        self.balance += growth + self.annual_contribution
-    
-    def withdraw(self, amount):
-        if self.balance >= amount:
-            self.balance -= amount
-            return amount
-        else:
-            actual = self.balance
-            self.balance = 0
-            return actual
-
-@dataclass
-class Liability:
-    name: str
-    balance: float
-    annual_interest_rate: float
-    monthly_payment: float
-    category: str = "Debt"
-
-    def pay_down_year(self):
-        for _ in range(12):
-            if self.balance <= 0: break
-            interest = self.balance * (self.annual_interest_rate / 12)
-            self.balance += interest
-            self.balance -= self.monthly_payment
-        if self.balance < 0: self.balance = 0
-
-# ==========================================
-# 3. PAGE CONFIG & STATE
+# 1. PAGE CONFIG & STATE
 # ==========================================
 st.set_page_config(page_title="Professional Wealth Planner", layout="wide")
 st.title("🔥 Professional Wealth Planner")
 
-if 'portfolio' not in st.session_state: st.session_state.portfolio = []
-if 'life_events' not in st.session_state: st.session_state.life_events = []
-if 'baseline_scenario' not in st.session_state: st.session_state.baseline_scenario = None
+# Load Data on Startup
+if 'data_loaded' not in st.session_state:
+    saved_data = load_data()
+    st.session_state.portfolio_list = saved_data.get("portfolio", [])
+    st.session_state.events_list = saved_data.get("events", [])
+    st.session_state.settings = saved_data.get("settings", {})
+    st.session_state.data_loaded = True
+    st.session_state.baseline_scenario = None
 
-if st.session_state.portfolio and not isinstance(st.session_state.portfolio[0], dict):
-    st.session_state.portfolio = []
+# Ensure lists exist if load failed or was empty
+if 'portfolio_list' not in st.session_state: st.session_state.portfolio_list = []
+if 'events_list' not in st.session_state: st.session_state.events_list = []
+if 'settings' not in st.session_state: st.session_state.settings = {}
+
+def trigger_save():
+    """Helper to save current state to file."""
+    data = {
+        "portfolio": st.session_state.portfolio_list,
+        "events": st.session_state.events_list,
+        # We need to capture current sidebar values. 
+        # Since sidebar widgets write to their own keys or return values, 
+        # we might need to update st.session_state.settings before saving.
+        "settings": st.session_state.settings 
+    }
+    if save_data(data):
+        st.toast("Data Saved Successfully!", icon="💾")
+    else:
+        st.error("Failed to save data.")
 
 def reset_portfolio():
-    st.session_state.portfolio = []
-    st.session_state.life_events = []
+    # Only resets lists, not file unless saved
+    default_assets = [
+        {"Name": "401k", "Category": "Stock Market", "Balance": 50000.0, "Monthly": 1000.0, "Rate": 0.07, "Tax Type": "Pre-Tax"},
+        {"Name": "Roth IRA", "Category": "Stock Market", "Balance": 20000.0, "Monthly": 500.0, "Rate": 0.07, "Tax Type": "Roth"},
+        {"Name": "Mortgage", "Category": "Debt/Liability", "Balance": 300000.0, "Monthly": 2000.0, "Rate": 0.04, "Tax Type": "N/A"}
+    ]
+    st.session_state.portfolio_list = default_assets
+    st.session_state.events_list = [{"Event Name": "Down Payment", "Age": 35, "Cost": 50000.0}]
     st.session_state.baseline_scenario = None
+    trigger_save() # Auto-save on reset
     st.rerun()
 
 # ==========================================
-# 4. SIDEBAR INPUTS
+# 2. DIALOGS
+# ==========================================
+
+@st.dialog("Manage Asset / Liability")
+def asset_dialog(item=None, index=None):
+    is_edit = item is not None
+    
+    name = item.get("Name", "") if is_edit else ""
+    cat = item.get("Category", "Stock Market") if is_edit else "Stock Market"
+    bal = item.get("Balance", 0.0) if is_edit else 0.0
+    monthly = item.get("Monthly", 0.0) if is_edit else 0.0
+    rate = item.get("Rate", 0.07) if is_edit else 0.07
+    tax = item.get("Tax Type", "Taxable") if is_edit else "Taxable"
+    
+    with st.form("asset_form"):
+        new_name = st.text_input("Name", value=name)
+        new_cat = st.selectbox("Category", ["Stock Market", "Cash", "Real Estate", "Crypto", "Debt/Liability"], index=["Stock Market", "Cash", "Real Estate", "Crypto", "Debt/Liability"].index(cat))
+        
+        c1, c2 = st.columns(2)
+        new_bal = c1.number_input("Current Balance ($)", value=float(bal), step=1000.0)
+        
+        if new_cat == "Debt/Liability":
+             new_monthly = c2.number_input("Monthly Payment ($)", value=float(monthly), step=100.0)
+             new_rate = st.number_input("Interest Rate (0.05 = 5%)", value=float(rate), step=0.01)
+             new_tax = "N/A"
+        else:
+             new_monthly = c2.number_input("Monthly Contribution ($)", value=float(monthly), step=100.0)
+             new_rate = st.number_input("Growth Rate (0.07 = 7%)", value=float(rate), step=0.01)
+             if new_cat == "Real Estate":
+                 new_tax = st.selectbox("Tax Type", ["Taxable", "Primary Residence"], index=0) 
+             else:
+                 opts = ["Taxable", "Roth", "Pre-Tax"]
+                 try: idx = opts.index(tax)
+                 except: idx = 0
+                 new_tax = st.selectbox("Tax Type", opts, index=idx)
+        
+        submitted = st.form_submit_button("Save")
+        if submitted:
+            new_item = {
+                "Name": new_name, "Category": new_cat, "Balance": new_bal, 
+                "Monthly": new_monthly, "Rate": new_rate, "Tax Type": new_tax
+            }
+            if is_edit:
+                st.session_state.portfolio_list[index] = new_item
+            else:
+                st.session_state.portfolio_list.append(new_item)
+            trigger_save() # Auto-save
+            st.rerun()
+
+def delete_asset(index):
+    st.session_state.portfolio_list.pop(index)
+    trigger_save() # Auto-save
+    st.rerun()
+
+def open_edit_asset(index):
+    asset_dialog(item=st.session_state.portfolio_list[index], index=index)
+    
+def open_add_asset():
+    asset_dialog(item=None, index=None)
+
+
+@st.dialog("Manage Life Event")
+def event_dialog(item=None, index=None):
+    is_edit = item is not None
+    name = item.get("Event Name", "") if is_edit else ""
+    age = item.get("Age", 40) if is_edit else 40
+    cost = item.get("Cost", 10000.0) if is_edit else 10000.0
+    
+    with st.form("event_form"):
+        new_name = st.text_input("Event Name", value=name)
+        new_age = st.number_input("Age Occurring", value=int(age), step=1)
+        new_cost = st.number_input("Cost ($ Today)", value=float(cost), step=1000.0)
+        
+        if st.form_submit_button("Save"):
+            new_item = {"Event Name": new_name, "Age": new_age, "Cost": new_cost}
+            if is_edit:
+                st.session_state.events_list[index] = new_item
+            else:
+                st.session_state.events_list.append(new_item)
+            trigger_save()
+            st.rerun()
+
+def delete_event(index):
+    st.session_state.events_list.pop(index)
+    trigger_save()
+    st.rerun()
+
+def open_edit_event(index):
+    event_dialog(item=st.session_state.events_list[index], index=index)
+
+def open_add_event():
+    event_dialog(item=None, index=None)
+
+# ==========================================
+# 3. SIDEBAR INPUTS
 # ==========================================
 with st.sidebar:
-    st.header("A/B Testing")
-    c_base, c_reset = st.columns(2)
-    if c_base.button("📸 Snap Baseline", help="Save current settings to compare against changes."):
-        st.session_state.trigger_baseline = True 
-    if c_reset.button("Reset All"):
+    st.header("Storage")
+    c_save, c_reset = st.columns(2)
+    if c_save.button("💾 Save Settings"):
+         trigger_save()
+         
+    if c_reset.button("Reset All", type="primary"):
         reset_portfolio()
     st.divider()
 
     st.header("1. Personal Details")
-    user_age = st.number_input("Current Age", 18, 84, 30)
-    filing_status = st.selectbox("Tax Filing Status", ["Single", "Married (Joint)"])
-    retirement_age = 59 
-    current_year_date = datetime.date.today().year
+    s = st.session_state.settings
     
-    # --- NEW: TIMEFRAME SELECTION ---
+    # We update session state on change
+    def update_setting(key):
+        def _Callback():
+            st.session_state.settings[key] = st.session_state[f"w_{key}"]
+        return _Callback
+
+    user_age = st.number_input("Current Age", 18, 84, s.get("user_age", 30), key="w_user_age", on_change=update_setting("user_age"))
+    filing_status = st.selectbox("Tax Filing Status", ["Single", "Married (Joint)"], 
+                                 index=0 if s.get("filing_status") == "Single" else 1, 
+                                 key="w_filing_status", on_change=update_setting("filing_status"))
+    retirement_age = 59 
+    
+    # --- PROJECTION PARAMETERS ---
+    st.header("2. Forecast Settings")
+    annual_spend = st.number_input("Desired Annual Spending ($)", value=s.get("annual_spend", 60000), step=1000, key="w_annual_spend", on_change=update_setting("annual_spend"))
+    swr = st.slider("Safe Withdrawal Rate (%)", 3.0, 5.0, s.get("swr", 0.04)*100) / 100
+    # Update SWR manually since slider is *100
+    st.session_state.settings["swr"] = swr 
+    
+    with st.expander("Advanced Assumptions"):
+        use_progressive = st.toggle("Use Progressive Tax Brackets", value=s.get("use_progressive", True), key="w_use_progressive", on_change=update_setting("use_progressive"))
+        
+        if not use_progressive:
+            tax_flat_rate = st.slider("Flat Tax Rate Estimate (%)", 0, 40, int(s.get("tax_flat_rate", 0.15)*100)) / 100
+            st.session_state.settings["tax_flat_rate"] = tax_flat_rate
+        else:
+            tax_flat_rate = 0.15
+            
+        contrib_growth = st.slider("Annual Contribution Increase (%)", 0.0, 10.0, s.get("contrib_growth", 0.03)*100) / 100
+        st.session_state.settings["contrib_growth"] = contrib_growth
+        
+        inflation_rate = st.slider("Inflation (%)", 0.0, 8.0, s.get("inflation_rate", 0.025)*100) / 100
+        st.session_state.settings["inflation_rate"] = inflation_rate
+
+    # --- TIMEFRAME ---
     st.subheader("Timeframe")
     timeframe_options = {
         "5 Years": 5, "10 Years": 10, "15 Years": 15, 
         "20 Years": 20, "25 Years": 25, "30 Years": 30, 
         "Until Age 85": 85 - user_age
     }
-    selected_timeframe = st.selectbox("View Forecast Until", list(timeframe_options.keys()), index=6)
     
+    # Default index
+    opts = list(timeframe_options.keys())
+    saved_tf = s.get("timeframe", "Until Age 85")
+    tf_idx = opts.index(saved_tf) if saved_tf in opts else 6
+    
+    selected_timeframe = st.selectbox("View Forecast Until", opts, index=tf_idx, key="w_timeframe", on_change=update_setting("timeframe"))
     years_to_project = timeframe_options[selected_timeframe]
     if years_to_project < 1: years_to_project = 1
     
+    # Update A/B Testing Baseline button
     st.divider()
-    
-    # --- ASSETS ---
-    st.header("2. Assets & Liabilities")
-    with st.expander("➕ Add Asset / Debt", expanded=False):
-        new_name = st.text_input("Name", placeholder="e.g. 401k")
-        new_cat = st.selectbox("Category", ["Stock Market", "Cash", "Real Estate", "Crypto", "Debt/Liability"])
-        c1, c2 = st.columns(2)
-        new_balance = c1.number_input("Balance", 0.0, step=1000.0)
-        new_monthly = c2.number_input("Monthly Add/Pay", 0.0, step=100.0)
-        if new_cat == "Debt/Liability":
-            new_rate = st.number_input("Interest Rate (%)", 0.0, value=5.0, step=0.1) / 100
-            new_tax = "N/A"
-            item_type = "liability"
-        else:
-            new_rate = st.number_input("Growth Rate (%)", -10.0, value=7.0, step=0.1) / 100
-            new_tax = st.selectbox("Tax Type", ["Taxable", "Roth", "Pre-Tax"])
-            item_type = "asset"
-        if st.button("Add"):
-            if new_name:
-                st.session_state.portfolio.append({
-                    "name": new_name, "balance": new_balance, "rate": new_rate,
-                    "monthly": new_monthly, "tax": new_tax, "category": new_cat, "type": item_type
-                })
-                st.success(f"Added {new_name}")
+    if st.button("📸 Snap Baseline"):
+        st.session_state.trigger_baseline = True
 
-    if st.session_state.portfolio:
-        for i, item in enumerate(st.session_state.portfolio):
-            c1, c2 = st.columns([4,1])
-            val = f"-${item['balance']:,.0f}" if item['type']=='liability' else f"${item['balance']:,.0f}"
-            c1.caption(f"**{item['name']}** ({item['tax']}): {val}")
-            if c2.button("x", key=f"d{i}"):
-                st.session_state.portfolio.pop(i)
-                st.rerun()
-    st.divider()
-
-    st.header("3. Life Events")
-    with st.expander("➕ Add Event", expanded=False):
-        ev_name = st.text_input("Event Name", placeholder="e.g. Down Payment")
-        # Ensure event age is within the full 85 year range
-        max_age_event = 85
-        ev_age = st.number_input("Age when event occurs", user_age + 1, max_age_event, user_age + 5)
-        ev_cost = st.number_input("Cost ($ Today's Value)", 0.0, step=5000.0)
-        if st.button("Add Event"):
-            st.session_state.life_events.append({"name": ev_name, "age": ev_age, "cost": ev_cost})
-    if st.session_state.life_events:
-        for i, ev in enumerate(st.session_state.life_events):
-            c1, c2 = st.columns([4,1])
-            c1.caption(f"**{ev['name']}** @ Age {ev['age']}: ${ev['cost']:,.0f}")
-            if c2.button("x", key=f"ev{i}"):
-                st.session_state.life_events.pop(i)
-                st.rerun()
-    st.divider()
-
-    st.header("4. Forecast Settings")
-    annual_spend = st.number_input("Desired Annual Spending ($)", value=60000, step=1000)
-    swr = st.slider("Safe Withdrawal Rate (%)", 3.0, 5.0, 4.0) / 100
-    st.subheader("Advanced Assumptions")
-    use_progressive = st.toggle("Use Progressive Tax Brackets", value=True)
-    if not use_progressive:
-        tax_flat_rate = st.slider("Flat Tax Rate Estimate (%)", 0, 40, 15) / 100
-    contrib_growth = st.slider("Annual Contribution Increase (%)", 0.0, 10.0, 3.0) / 100
-    inflation_rate = st.slider("Inflation (%)", 0.0, 8.0, 2.5) / 100
 
 # ==========================================
-# 5. SIMULATION ENGINE
+# 4. MAIN AREA - CARDS UI
 # ==========================================
-def run_simulation(portfolio_data, life_events_data, total_years_to_project):
-    # Use a DEEP COPY to prevent the simulation from changing the sidebar inputs' original values
-    sim_objects = []
-    for p in portfolio_data:
-        if p['type'] == 'asset':
-            sim_objects.append(Asset(p['name'], p['balance'], p['monthly']*12, p['rate'], p['tax'], p['category']))
+
+st.subheader("📝 Portfolio")
+
+c_title, c_add = st.columns([0.85, 0.15])
+c_title.caption("Your Engines of Wealth")
+if c_add.button("➕ Add Asset"):
+    open_add_asset()
+
+cols = st.columns(3)
+for i, item in enumerate(st.session_state.portfolio_list):
+    with cols[i % 3]:
+        if item.get("Category") == "Debt/Liability":
+             render_liability_card(item, i, open_edit_asset, delete_asset)
         else:
-            sim_objects.append(Liability(p['name'], p['balance'], p['rate'], p['monthly']))
-            
-    data = []
-    current_year = current_year_date
+             render_asset_card(item, i, open_edit_asset, delete_asset)
+
+st.divider()
+
+# --- EVENTS SECTION ---
+c_title_ev, c_add_ev = st.columns([0.85, 0.15])
+c_title_ev.subheader("📅 Life Events")
+c_title_ev.caption("Big one-time expenses")
+if c_add_ev.button("➕ Add Event"):
+    open_add_event()
+
+ev_cols = st.columns(3)
+for i, item in enumerate(st.session_state.events_list):
+    with ev_cols[i % 3]:
+        render_event_card(item, i, open_edit_event, delete_event)
+
+
+# ==========================================
+# 5. SIMULATION EXECUTION
+# ==========================================
+
+sim_params = {
+    "annual_spend": annual_spend,
+    "swr": swr,
+    "inflation_rate": inflation_rate,
+    "contrib_growth": contrib_growth,
+    "filing_status": filing_status,
+    "use_progressive": use_progressive,
+    "tax_flat_rate": tax_flat_rate,
+    "retirement_age": retirement_age
+}
+
+if st.session_state.portfolio_list:
+    df_full = run_simulation(st.session_state.portfolio_list, st.session_state.events_list, user_age, years_to_project, sim_params)
     
-    # We must run the full simulation until age 85 internally 
-    # to account for Life Events occurring later than the selected time frame.
-    max_projection_years = 85 - user_age
-    
-    for year in range(max_projection_years + 1):
-        current_age = user_age + year
-        row = {"Year": current_year, "Age": current_age}
-        
-        # --- A. LIFE EVENTS ---
-        for ev in life_events_data:
-            if ev['age'] == current_age:
-                future_cost = ev['cost'] * ((1 + inflation_rate) ** year)
-                remaining_cost = future_cost
-                for tax_type in [['Cash', 'Taxable'], ['Roth'], ['Pre-Tax']]:
-                    for item in sim_objects:
-                        if isinstance(item, Asset) and remaining_cost > 0:
-                            is_cash = (tax_type == ['Cash', 'Taxable'] and item.category == 'Cash')
-                            is_tax_match = (item.tax_status in tax_type)
-                            if is_cash or is_tax_match:
-                                remaining_cost -= item.withdraw(remaining_cost)
-
-        # --- B. ANNUAL SIMULATION ---
-        total_assets_gross = 0
-        gross_swr_base = 0
-        can_access_retirement = current_age >= retirement_age
-
-        for item in sim_objects:
-            if isinstance(item, Asset):
-                if year > 0: item.project_year(contrib_growth)
-                real_val = item.balance / ((1 + inflation_rate) ** year)
-                total_assets_gross += real_val
-                row[item.name] = real_val
-                
-                if (item.tax_status in ['Taxable', 'Roth', 'Cash']) or can_access_retirement:
-                    gross_swr_base += real_val
-            elif isinstance(item, Liability):
-                if year > 0: item.pay_down_year()
-                real_val = item.balance / ((1 + inflation_rate) ** year)
-                total_assets_gross += -real_val
-                row[item.name] = -real_val
-
-        # --- C. TAX & INCOME CALCULATION ---
-        gross_passive_income = gross_swr_base * swr
-        
-        if use_progressive:
-            estimated_tax = calculate_progressive_tax(gross_passive_income, filing_status)
-            net_passive_income = gross_passive_income - estimated_tax
-        else:
-            net_passive_income = gross_passive_income * (1 - tax_flat_rate)
-
-        # --- D. ATTRIBUTE INCOME TO ASSETS ---
-        if gross_swr_base > 0:
-             for item in sim_objects:
-                 income_col_name = f"{item.name} Income"
-                 if isinstance(item, Asset) and ((item.tax_status in ['Taxable', 'Roth', 'Cash']) or can_access_retirement):
-                     share = row.get(item.name, 0) / gross_swr_base
-                     row[income_col_name] = net_passive_income * share
-                 else:
-                     row[income_col_name] = 0
-        else:
-             for item in sim_objects:
-                 if isinstance(item, Asset): row[f"{item.name} Income"] = 0
-
-        row["Net Worth"] = total_assets_gross
-        row["Passive Income"] = net_passive_income
-        row["Annual Spending"] = annual_spend
-        data.append(row)
-        
-        current_year += 1
-        
-    return pd.DataFrame(data)
-
-# EXECUTE
-if st.session_state.portfolio:
-    df_full = run_simulation(st.session_state.portfolio, st.session_state.life_events, years_to_project)
-    
-    # Filter for the selected timeframe
     df_current = df_full.head(years_to_project + 1)
     
     if getattr(st.session_state, 'trigger_baseline', False):
         st.session_state.baseline_scenario = df_full.copy()
         st.session_state.trigger_baseline = False
         st.success("Baseline Snapshot Saved!")
-    df_baseline = st.session_state.baseline_scenario.head(years_to_project + 1) if st.session_state.baseline_scenario is not None else None
+    
+    df_baseline = None
+    if st.session_state.baseline_scenario is not None:
+         df_baseline = st.session_state.baseline_scenario.head(years_to_project + 1)
 
-    # Get data for the final year summary
     final_year_data = df_current.iloc[-1]
     
     # ==========================================
     # 6. VISUALIZATION
     # ==========================================
-    
+    st.divider()
     st.subheader("🏁 Financial Independence Dashboard")
     
-    # Metrics
     crossover_rows = df_current[df_current["Passive Income"] >= df_current["Annual Spending"]]
     freedom_year = crossover_rows.iloc[0]["Year"] if not crossover_rows.empty else None
     
@@ -327,99 +320,66 @@ if st.session_state.portfolio:
     monthly_income = df_current.iloc[0]["Passive Income"] / 12
     c3.metric("Safe Monthly Income (Net)", f"${monthly_income:,.0f}")
 
-    # --- CHART 1: INCOME STACKED AREA ---
-    st.subheader("Income Sources vs. Spending Requirement")
+    tab_inc, tab_nw, tab_tax = st.tabs(["💵 Income Stream", "📈 Net Worth", "🏛️ Tax Breakdown"])
     
-    col_zoom, col_log = st.columns([1,12])
-    zoom = col_zoom.toggle("🔍 Zoom", value=True, key="zoom_toggle")
-    log_scale_inc = col_log.toggle("Log Scale Y-Axis", value=False, key="log_inc_toggle")
-
-    income_cols = [c for c in df_current.columns if c.endswith(" Income") and c != "Passive Income"]
-    
-    fig_inc = go.Figure()
-    for col in income_cols:
-        asset_name = col.replace(" Income", "")
-        fig_inc.add_trace(go.Scatter(x=df_current['Year'], y=df_current[col], mode='lines', stackgroup='one', name=asset_name))
+    with tab_inc:
+        col_zoom, col_log = st.columns([1,12])
+        zoom = col_zoom.toggle("🔍 Zoom", value=True, key="zoom_toggle")
         
-    fig_inc.add_trace(go.Scatter(x=df_current['Year'], y=df_current['Annual Spending'], 
-                             mode='lines', name='Required Spending', line=dict(color='red', width=3)))
-
-    if df_baseline is not None:
-         fig_inc.add_trace(go.Scatter(x=df_baseline['Year'], y=df_baseline['Passive Income'], 
-                                 mode='lines', name='Baseline Total Income', line=dict(color='gray', dash='dash')))
-
-    if zoom:
-        fig_inc.update_layout(yaxis_range=[0, annual_spend * 3])
-    
-    if log_scale_inc:
-        fig_inc.update_yaxes(type="log", title="Net Annual Income (Log Scale $)")
-    else:
-         fig_inc.update_yaxes(type="linear", title="Net Annual Income ($)")
-
-
-    fig_inc.update_layout(
-        title=f"Net Passive Income Breakdown (Real $) - Forecast to {final_year_data['Year']}",
-        xaxis_title="Year",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5),
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig_inc, use_container_width=True, key="income_stack_chart")
-    
-    # --- RESULTS 1: INCOME SUMMARY ---
-    with st.expander(f"Income Summary for {final_year_data['Year']}"):
-        st.subheader(f"Projected Net Annual Income: ${final_year_data['Passive Income']:,.0f}")
-        st.caption(f"Spending Requirement: ${final_year_data['Annual Spending']:,.0f}")
+        income_cols = [c for c in df_current.columns if c.endswith(" Income") and c != "Passive Income"]
         
-        income_summary = {}
+        fig_inc = go.Figure()
         for col in income_cols:
-            income_summary[col.replace(" Income", "")] = final_year_data[col]
+            asset_name = col.replace(" Income", "")
+            fig_inc.add_trace(go.Scatter(x=df_current['Year'], y=df_current[col], mode='lines', stackgroup='one', name=asset_name))
             
-        df_inc_summary = pd.DataFrame(list(income_summary.items()), columns=['Asset', 'Projected Net Income'])
-        df_inc_summary = df_inc_summary[df_inc_summary['Projected Net Income'] > 0].sort_values(by='Projected Net Income', ascending=False)
-        st.dataframe(df_inc_summary.style.format({"Projected Net Income": "${:,.0f}"}), use_container_width=True, hide_index=True)
+        fig_inc.add_trace(go.Scatter(x=df_current['Year'], y=df_current['Annual Spending'], 
+                                 mode='lines', name='Required Spending', line=dict(color='red', width=3)))
 
+        if df_baseline is not None:
+             fig_inc.add_trace(go.Scatter(x=df_baseline['Year'], y=df_baseline['Passive Income'], 
+                                     mode='lines', name='Baseline Total Income', line=dict(color='gray', dash='dash')))
 
-    # --- CHART 2: NET WORTH STACKED AREA ---
-    st.subheader("Net Worth Composition")
-
-    col_log_nw, col_gap = st.columns([1,12])
-    log_scale_nw = col_log_nw.toggle("Log Scale Y-Axis", value=False, key="log_nw_toggle")
-
-    excluded_cols = ['Year', 'Age', 'Net Worth', 'Passive Income', 'Annual Spending']
-    balance_cols = [c for c in df_current.columns if c not in excluded_cols and not c.endswith(" Income")]
-    
-    fig_nw_stack = go.Figure()
-    for col in balance_cols:
-        fig_nw_stack.add_trace(go.Scatter(x=df_current['Year'], y=df_current[col], mode='lines', stackgroup='one', name=col))
-
-    if df_baseline is not None:
-         fig_nw_stack.add_trace(go.Scatter(x=df_baseline['Year'], y=df_baseline['Net Worth'], 
-                                name='Baseline Total NW', line=dict(color='gray', dash='dash')))
-
-    if log_scale_nw:
-        fig_nw_stack.update_yaxes(type="log", title="Net Worth (Log Scale $)")
-    else:
-         fig_nw_stack.update_yaxes(type="linear", title="Net Worth ($)")
-         
-    fig_nw_stack.update_layout(
-        title=f"Asset Balance Breakdown (Real $) - Forecast to {final_year_data['Year']}",
-        xaxis_title="Year",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5),
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig_nw_stack, use_container_width=True, key="nw_stack_chart")
-    
-    # --- RESULTS 2: NET WORTH SUMMARY ---
-    with st.expander(f"Net Worth Summary for {final_year_data['Year']}"):
-        st.subheader(f"Projected Total Net Worth: ${final_year_data['Net Worth']:,.0f}")
+        if zoom:
+            fig_inc.update_layout(yaxis_range=[0, annual_spend * 3])
         
-        nw_summary = {}
+        fig_inc.update_layout(title="Net Passive Income Breakdown (Real $)", hovermode="x unified")
+        st.plotly_chart(fig_inc, use_container_width=True)
+
+    with tab_nw:
+        excluded_cols = ['Year', 'Age', 'Net Worth', 'Passive Income', 'Annual Spending']
+        balance_cols = [c for c in df_current.columns if c not in excluded_cols and not c.endswith(" Income")]
+        
+        fig_nw = go.Figure()
         for col in balance_cols:
-            nw_summary[col] = final_year_data[col]
+            fig_nw.add_trace(go.Scatter(x=df_current['Year'], y=df_current[col], mode='lines', stackgroup='one', name=col))
             
-        df_nw_summary = pd.DataFrame(list(nw_summary.items()), columns=['Asset', 'Projected Balance'])
-        df_nw_summary = df_nw_summary[df_nw_summary['Projected Balance'].abs() > 0].sort_values(by='Projected Balance', ascending=False)
-        st.dataframe(df_nw_summary.style.format({"Projected Balance": "${:,.0f}"}), use_container_width=True, hide_index=True)
+        fig_nw.update_layout(title="Net Worth Composition (Real $)", hovermode="x unified")
+        st.plotly_chart(fig_nw, use_container_width=True)
+        
+    with tab_tax:
+        tax_buckets = {"Taxable": [], "Roth": [], "Pre-Tax": []}
+        for item in st.session_state.portfolio_list:
+            t = item.get("Tax Type", "N/A")
+            if t in tax_buckets:
+                tax_buckets[t].append(f"{item['Name']} Income")
+        
+        df_tax = pd.DataFrame()
+        df_tax['Year'] = df_current['Year']
+        
+        for bucket, cols in tax_buckets.items():
+            valid_cols = [c for c in cols if c in df_current.columns]
+            if valid_cols:
+                df_tax[bucket] = df_current[valid_cols].sum(axis=1)
+            else:
+                df_tax[bucket] = 0.0
+                
+        fig_tax = go.Figure()
+        for bucket in ["Taxable", "Roth", "Pre-Tax"]:
+            fig_tax.add_trace(go.Scatter(x=df_tax['Year'], y=df_tax[bucket], mode='lines', stackgroup='one', name=bucket))
+            
+        fig_tax.update_layout(title="Passive Income by Tax Treatment (Net)", hovermode="x unified")
+        st.plotly_chart(fig_tax, use_container_width=True)
 
 else:
-    st.info("👈 Please add assets in the sidebar to begin.")
+    st.info("👈 Please add assets above to begin.")
