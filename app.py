@@ -323,7 +323,7 @@ if st.session_state.portfolio_list:
     tab_inc, tab_nw, tab_tax = st.tabs(["💵 Income Stream", "📈 Net Worth", "🏛️ Tax Breakdown"])
     
     with tab_inc:
-        col_zoom, col_log = st.columns([1,12])
+        col_zoom, col_log = st.columns([2,10])
         zoom = col_zoom.toggle("🔍 Zoom", value=True, key="zoom_toggle")
         
         income_cols = [c for c in df_current.columns if c.endswith(" Income") and c != "Passive Income"]
@@ -343,8 +343,16 @@ if st.session_state.portfolio_list:
         if zoom:
             fig_inc.update_layout(yaxis_range=[0, annual_spend * 3])
         
-        fig_inc.update_layout(title="Net Passive Income Breakdown (Real $)", hovermode="x unified")
+        fig_inc.update_layout(
+            title="Net Passive Income Breakdown (Real $)", 
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        )
         st.plotly_chart(fig_inc, use_container_width=True)
+        
+        st.info("ℹ️ **How to read:** 'Required Spending' is your annual lifestyle cost. 'Passive Income' is the safe withdrawal amount from your invested assets. When **Passive Income > Required Spending**, you are Financially Independent.")
+        with st.expander("View Raw Data"):
+             st.dataframe(df_current[["Year", "Age", "Passive Income", "Annual Spending"] + income_cols])
 
     with tab_nw:
         excluded_cols = ['Year', 'Age', 'Net Worth', 'Passive Income', 'Annual Spending']
@@ -354,8 +362,16 @@ if st.session_state.portfolio_list:
         for col in balance_cols:
             fig_nw.add_trace(go.Scatter(x=df_current['Year'], y=df_current[col], mode='lines', stackgroup='one', name=col))
             
-        fig_nw.update_layout(title="Net Worth Composition (Real $)", hovermode="x unified")
+        fig_nw.update_layout(
+            title="Net Worth Composition (Real $)", 
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        )
         st.plotly_chart(fig_nw, use_container_width=True)
+        
+        st.info("ℹ️ **How to read:** This tracks your **Net Worth** (Total Assets - Debts) over time. It shows the projected growth of your wealth based on your contributions and market returns.")
+        with st.expander("View Raw Data"):
+             st.dataframe(df_current[["Year", "Age", "Net Worth"] + balance_cols])
         
     with tab_tax:
         tax_buckets = {"Taxable": [], "Roth": [], "Pre-Tax": []}
@@ -378,8 +394,18 @@ if st.session_state.portfolio_list:
         for bucket in ["Taxable", "Roth", "Pre-Tax"]:
             fig_tax.add_trace(go.Scatter(x=df_tax['Year'], y=df_tax[bucket], mode='lines', stackgroup='one', name=bucket))
             
-        fig_tax.update_layout(title="Passive Income by Tax Treatment (Net)", hovermode="x unified")
+        fig_tax.update_layout(
+            title="Passive Income by Tax Treatment (Net)", 
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        )
         st.plotly_chart(fig_tax, use_container_width=True)
+
+        st.info("ℹ️ **How to read:** This breaks down your passive income by tax treatment. **Roth**: Tax-free. **Pre-Tax**: Taxed as ordinary income. **Taxable**: Taxed on capital gains.")
+        with st.expander("View Raw Data"):
+             df_tax["Age"] = df_current["Age"]
+             cols = ["Year", "Age", "Taxable", "Roth", "Pre-Tax"]
+             st.dataframe(df_tax[cols])
 
 else:
     st.info("👈 Please add assets above to begin.")

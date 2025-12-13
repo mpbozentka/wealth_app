@@ -113,10 +113,25 @@ def run_simulation(portfolio_data, life_events_data, user_age, years_to_project,
                             if is_cash or is_tax_match:
                                 remaining_cost -= item.withdraw(remaining_cost)
 
-        # --- B. ANNUAL SIMULATION ---
+        # --- B. ANNUAL SPEND DRAWDOWN ---
+        # Deduct annual spending from assets BEFORE growth (Withdraw -> Grow)
+        # ONLY if retirement age is reached.
+        can_access_retirement = current_age >= retirement_age
+        
+        remaining_spend = annual_spend
+        if remaining_spend > 0 and can_access_retirement:
+            for tax_type in [['Cash', 'Taxable'], ['Roth'], ['Pre-Tax']]:
+                for item in sim_objects:
+                    if isinstance(item, Asset) and remaining_spend > 0:
+                        is_cash = (tax_type == ['Cash', 'Taxable'] and item.category == 'Cash')
+                        is_tax_match = (item.tax_status in tax_type)
+                        if is_cash or is_tax_match:
+                            remaining_spend -= item.withdraw(remaining_spend)
+
+        # --- C. ANNUAL SIMULATION ---
         total_assets_gross = 0
         gross_swr_base = 0
-        can_access_retirement = current_age >= retirement_age
+
 
         for item in sim_objects:
             if isinstance(item, Asset):
@@ -125,7 +140,7 @@ def run_simulation(portfolio_data, life_events_data, user_age, years_to_project,
                 total_assets_gross += real_val
                 row[item.name] = real_val
                 
-                if (item.tax_status in ['Taxable', 'Roth', 'Cash']) or can_access_retirement:
+                if (item.tax_status in ['Taxable', 'Cash']) or can_access_retirement:
                     gross_swr_base += real_val
             elif isinstance(item, Liability):
                 if year > 0: item.pay_down_year()
@@ -133,7 +148,7 @@ def run_simulation(portfolio_data, life_events_data, user_age, years_to_project,
                 total_assets_gross += -real_val
                 row[item.name] = -real_val
 
-        # --- C. TAX & INCOME CALCULATION ---
+        # --- D. TAX & INCOME CALCULATION ---
         gross_passive_income = gross_swr_base * swr
         
         if use_progressive:
@@ -142,11 +157,11 @@ def run_simulation(portfolio_data, life_events_data, user_age, years_to_project,
         else:
             net_passive_income = gross_passive_income * (1 - tax_flat_rate)
 
-        # --- D. ATTRIBUTE INCOME TO ASSETS ---
+        # --- E. ATTRIBUTE INCOME TO ASSETS ---
         if gross_swr_base > 0:
              for item in sim_objects:
                  income_col_name = f"{item.name} Income"
-                 if isinstance(item, Asset) and ((item.tax_status in ['Taxable', 'Roth', 'Cash']) or can_access_retirement):
+                 if isinstance(item, Asset) and ((item.tax_status in ['Taxable', 'Cash']) or can_access_retirement):
                      share = row.get(item.name, 0) / gross_swr_base
                      row[income_col_name] = net_passive_income * share
                  else:
